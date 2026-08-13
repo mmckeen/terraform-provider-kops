@@ -2,6 +2,7 @@ package schemas
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -98,10 +99,42 @@ func SuppressDiff(s *schema.Schema) *schema.Schema {
 	return s
 }
 
+// validateParsable builds a ValidateFunc that rejects strings the corresponding
+// expander cannot parse. The expanders discard their parse errors, so without
+// this an unparseable value silently becomes the zero value instead of failing
+// the plan. For a duration that is particularly unhelpful: kops mints no admin
+// client certificate at all when the lifetime is zero, so a typo surfaces as an
+// authentication failure partway through a rolling update rather than as a
+// config error.
+//
+// The empty string is accepted. The expanders treat an empty attribute as unset
+// and fall back to the default, so rejecting it here would break configurations
+// that thread an optional variable through.
+func validateParsable(kind string, parse func(string) error) schema.SchemaValidateFunc {
+	return func(i interface{}, k string) ([]string, []error) {
+		v, ok := i.(string)
+		if !ok {
+			return nil, []error{fmt.Errorf("expected %s %q to be a string", kind, k)}
+		}
+		if v == "" {
+			return nil, nil
+		}
+		if err := parse(v); err != nil {
+			return nil, []error{fmt.Errorf("%q is not a valid %s: %w", k, kind, err)}
+		}
+		return nil, nil
+	}
+}
+
 // Quantity
 
 func OptionalQuantity() *schema.Schema {
-	return OptionalString()
+	s := OptionalString()
+	s.ValidateFunc = validateParsable("quantity", func(v string) error {
+		_, err := resource.ParseQuantity(v)
+		return err
+	})
+	return s
 }
 
 func ComputedQuantity() *schema.Schema {
@@ -120,7 +153,12 @@ func FlattenQuantity(in resource.Quantity) interface{} {
 // Duration
 
 func OptionalDuration() *schema.Schema {
-	return OptionalString()
+	s := OptionalString()
+	s.ValidateFunc = validateParsable("duration", func(v string) error {
+		_, err := time.ParseDuration(v)
+		return err
+	})
+	return s
 }
 
 func ComputedDuration() *schema.Schema {
